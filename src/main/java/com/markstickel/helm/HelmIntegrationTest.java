@@ -20,4 +20,5 @@ public @interface HelmIntegrationTest {
     String helmValuesOverride() default "";
     String readinessPath() default "/"; // TODO detect from k8s service descriptor
     String kubernetesNodeHost() default "127.0.0.1"; // TODO detect from current k8s context
+    boolean helmDeleteAfterTests() default true;
 }

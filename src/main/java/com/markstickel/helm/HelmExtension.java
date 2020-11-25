@@ -12,8 +12,12 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.lang.reflect.Field;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
@@ -24,6 +28,15 @@ public class HelmExtension implements BeforeAllCallback, AfterAllCallback {
     private static final Logger logger = LoggerFactory.getLogger(HelmExtension.class);
 
     private static final String helmGroup = "it" + LocalTime.now().format(DateTimeFormatter.ofPattern("hhmmss"));
+    private String serviceName;
+    private String kubernetesNodeHost;
+    private Integer servicePort;
+
+    private KubernetesServiceDataLoader kubernetesServiceDataLoader;
+
+    public HelmExtension() {
+        kubernetesServiceDataLoader = new KubernetesServiceDataLoader();
+    }
 
     @Override
     public void beforeAll(ExtensionContext extensionContext) throws Exception {
@@ -32,18 +45,24 @@ public class HelmExtension implements BeforeAllCallback, AfterAllCallback {
 
         String namespace = kitAnnotation.namespace();
         String helmChartDir = kitAnnotation.helmChartDir();
-        String serviceName = kitAnnotation.helmServiceName();
+        serviceName = kitAnnotation.helmServiceName();
         String valuesOverride = kitAnnotation.helmValuesOverride();
         String readinessPath = kitAnnotation.readinessPath();
-        String kubernetesNodeHost = kitAnnotation.kubernetesNodeHost();
+        kubernetesNodeHost = kitAnnotation.kubernetesNodeHost();
 
         String[] depUpCmd = {"/bin/sh", "-c", "helm dep up " + helmChartDir + " --namespace " + namespace};
         runStatic(depUpCmd);
         String[] cmd = {"/bin/sh", "-c", "helm install " + (!StringUtils.isEmpty(valuesOverride) ? "-f " + valuesOverride : "") + " " + helmGroup + " " + helmChartDir + " --namespace " + namespace};
         runStatic(cmd);
-        waitForKubernetesReady(serviceName, namespace);
-        int servicePort = setTestPort(helmGroup, serviceName, namespace);
-        waitForServiceReady(kubernetesNodeHost, servicePort, readinessPath);
+        waitForKubernetesReady(serviceName, namespace); // TODO wait for ALL services to be ready; no need to specify one
+        Map<String, KubernetesService> serviceMap = kubernetesServiceDataLoader.loadServiceDataMap(namespace);
+        servicePort = setTestPort(helmGroup, serviceName, namespace);
+        waitForServiceReady(kubernetesNodeHost, servicePort, readinessPath); // TODO check that ALL services are ready
+
+        setTestField(extensionContext, "serviceName", serviceName);
+        setTestField(extensionContext, "kubernetesNodeHost", kubernetesNodeHost);
+        setTestField(extensionContext, "servicePort", servicePort);
+        setTestField(extensionContext, "serviceMap", serviceMap);
     }
 
     @Override
@@ -55,8 +74,11 @@ public class HelmExtension implements BeforeAllCallback, AfterAllCallback {
 
         String del = "helm delete " + helmGroup + " --namespace " + namespace;
         logger.info("Command to delete: " + del);
-        String[] cmd = {"/bin/sh", "-c", del};
-        runStatic(cmd);
+
+        if (kitAnnotation.helmDeleteAfterTests()) {
+            String[] cmd = {"/bin/sh", "-c", del};
+            runStatic(cmd);
+        }
 
     }
 
@@ -166,5 +188,23 @@ public class HelmExtension implements BeforeAllCallback, AfterAllCallback {
         logger.info("Set service port to {}", servicePort);
         return servicePort;
     }
+
+    private void setTestField(ExtensionContext extensionContext, String fieldName, Object value) {
+        Optional<Field> fieldOpt = Arrays.stream(extensionContext.getRequiredTestClass().getDeclaredFields())
+                .filter(f -> f.isAnnotationPresent(HelmTestContext.class))
+                .filter(f -> f.getAnnotation(HelmTestContext.class).value().equals(fieldName))
+                .findFirst();
+        if (fieldOpt.isPresent()) {
+            logger.info("Setting value for field {} to {}", fieldName, value);
+            Field field = fieldOpt.get();
+            field.setAccessible(true);
+            try {
+                field.set(null, value); // sets a static field
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
 
 }
